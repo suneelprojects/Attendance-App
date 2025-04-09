@@ -1,625 +1,625 @@
-import React, { useEffect, useState } from 'react';
-import { useSelector } from 'react-redux';
-import { Doughnut, Bar } from 'react-chartjs-2';
-import Calendar from 'react-calendar';
-import 'react-calendar/dist/Calendar.css';
-import {
-  BookOpen,
-  Users,
-  Monitor,
-  Building,
-  Calendar as CalendarIcon,
-  CheckCircle,
-  XCircle,
-  ChevronDown,
-  ChevronUp,
+
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useDispatch } from 'react-redux';
+import { 
+  MapPin, 
+  CheckCircle, 
+  Users, 
+  Calendar,
   Clock,
-  UserCheck,
-  Smartphone,
-  MapPin,
+  BookOpen,
   AlertTriangle,
-  BarChart
+  Info,
+  Smartphone,
+  Wifi,
+  WifiOff,
+  Navigation
 } from 'lucide-react';
-import {
-  Chart as ChartJS,
-  ArcElement,
-  Tooltip,
-  Legend,
-  Title,
-  CategoryScale,
-  LinearScale,
-  BarElement
-} from 'chart.js';
-import { format, parseISO, isToday } from 'date-fns';
+import { addAttendanceRecord } from '../../store/slices/attendanceSlice';
+import { updateHistory } from '../../store/slices/scheduleSlice';
+import { db } from '../../firebase/config';
+import { collection, doc, getDoc, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
+import { toast } from 'react-toastify';
+import { format } from 'date-fns';
 
-// Register ChartJS components
-ChartJS.register(
-  ArcElement,
-  Tooltip,
-  Legend,
-  Title,
-  CategoryScale,
-  LinearScale,
-  BarElement
-);
+const getDeviceId = () => {
+  try {
+    const storedId = localStorage.getItem('deviceId');
+    if (storedId) return storedId;
+    
+    const components = [
+      navigator.userAgent,
+      navigator.platform,
+      `${window.screen.width}x${window.screen.height}`,
+      window.screen.colorDepth,
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+      navigator.language,
+      Date.now()
+    ].filter(Boolean);
+    
+    const deviceId = btoa(components.join('-'));
+    localStorage.setItem('deviceId', deviceId);
+    return deviceId;
+  } catch (error) {
+    console.error('Error generating device ID:', error);
+    return `fallback-${Date.now()}-${Math.random()}`;
+  }
+};
 
-const Courses = () => {
-  const { batches } = useSelector(state => state.batches);
-  const { allRecords: attendanceRecords } = useSelector(state => state.attendance);
-  const [courseStats, setCourseStats] = useState([]);
-  const [expandedCourse, setExpandedCourse] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(new Date());
-  const [overallStats, setOverallStats] = useState({
-    totalStudents: 0,
-    onlineStudents: 0,
-    offlineStudents: 0,
-    totalAttendance: 0,
-    onlinePresent: 0,
-    onlineAbsent: 0,
-    offlinePresent: 0,
-    offlineAbsent: 0
-  });
+const StudentAttendance = () => {
+  const { batchId } = useParams();
+  const navigate = useNavigate();
+  const dispatch = useDispatch();
+  const [batch, setBatch] = useState(null);
+  const [selectedStudent, setSelectedStudent] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [location, setLocation] = useState(null);
+  const [locationError, setLocationError] = useState(null);
+  const [hasMarkedAttendance, setHasMarkedAttendance] = useState(false);
+  const [deviceId] = useState(getDeviceId());
+  const [isGettingLocation, setIsGettingLocation] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [locationAccuracy, setLocationAccuracy] = useState(null);
+  const [locationWatchId, setLocationWatchId] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isSecureContext, setIsSecureContext] = useState(window.isSecureContext);
 
   useEffect(() => {
-    if (batches.length > 0 && attendanceRecords.length > 0) {
-      // Calculate overall stats first
-      const overall = {
-        totalStudents: batches.reduce((acc, batch) => acc + (batch.students?.length || 0), 0),
-        onlineStudents: batches.reduce((acc, batch) => 
-          acc + (batch.students?.filter(s => s.mode === 'online').length || 0), 0),
-        offlineStudents: batches.reduce((acc, batch) => 
-          acc + (batch.students?.filter(s => s.mode === 'offline').length || 0), 0),
-        totalAttendance: attendanceRecords.length,
-        onlinePresent: attendanceRecords.filter(r => r.status === 'present' && r.mode === 'online').length,
-        onlineAbsent: attendanceRecords.filter(r => r.status === 'absent' && r.mode === 'online').length,
-        offlinePresent: attendanceRecords.filter(r => r.status === 'present' && r.mode === 'offline').length,
-        offlineAbsent: attendanceRecords.filter(r => r.status === 'absent' && r.mode === 'offline').length
-      };
-      setOverallStats(overall);
-
-      const courseData = batches.reduce((acc, batch) => {
-        if (!acc[batch.course]) {
-          acc[batch.course] = {
-            totalStudents: 0,
-            onlineStudents: 0,
-            offlineStudents: 0,
-            batches: [],
-            attendance: {
-              present: 0,
-              absent: 0,
-              onlinePresent: 0,
-              offlinePresent: 0,
-              onlineAbsent: 0,
-              offlineAbsent: 0,
-              adminMarked: 0,
-              deviceMarked: 0,
-              locationVerified: 0
-            }
-          };
-        }
-
-        const batchStats = {
-          id: batch.id,
-          name: batch.name,
-          students: batch.students?.length || 0,
-          onlineStudents: batch.students?.filter(s => s.mode === 'online').length || 0,
-          offlineStudents: batch.students?.filter(s => s.mode === 'offline').length || 0,
-          startDate: batch.startDate,
-          presentStudents: [],
-          absentStudents: []
-        };
-
-        acc[batch.course].batches.push(batchStats);
-        acc[batch.course].totalStudents += batchStats.students;
-        acc[batch.course].onlineStudents += batchStats.onlineStudents;
-        acc[batch.course].offlineStudents += batchStats.offlineStudents;
-
-        const batchAttendance = attendanceRecords.filter(record => 
-          record.batchId === batch.id &&
-          format(new Date(record.date), 'yyyy-MM-dd') === format(selectedDate, 'yyyy-MM-dd')
-        );
-        
-        batchAttendance.forEach(record => {
-          if (record.status === 'present') {
-            acc[batch.course].attendance.present++;
-            if (record.mode === 'online') {
-              acc[batch.course].attendance.onlinePresent++;
-            } else {
-              acc[batch.course].attendance.offlinePresent++;
-            }
-          } else {
-            acc[batch.course].attendance.absent++;
-            if (record.mode === 'online') {
-              acc[batch.course].attendance.onlineAbsent++;
-            } else {
-              acc[batch.course].attendance.offlineAbsent++;
-            }
-          }
-
-          if (record.markedByAdmin) {
-            acc[batch.course].attendance.adminMarked++;
-          } else {
-            acc[batch.course].attendance.deviceMarked++;
-          }
-
-          if (record.location && record.location.lat && record.location.lng) {
-            acc[batch.course].attendance.locationVerified++;
-          }
-        });
-
-        const selectedDateString = format(selectedDate, 'yyyy-MM-dd');
-        const batchAttendanceForDate = batchAttendance
-          .sort((a, b) => new Date(b.date) - new Date(a.date));
-
-        const studentStatusMap = new Map();
-        batchAttendanceForDate.forEach(record => {
-          if (!studentStatusMap.has(record.studentId)) {
-            studentStatusMap.set(record.studentId, {
-              name: record.studentName,
-              mode: record.mode,
-              date: record.date,
-              status: record.status,
-              markedByAdmin: record.markedByAdmin || false,
-              location: record.location,
-              deviceId: record.deviceId
-            });
-          }
-        });
-
-        const batchIndex = acc[batch.course].batches.findIndex(b => b.id === batch.id);
-        studentStatusMap.forEach((data, studentId) => {
-          const attendanceInfo = {
-            ...data,
-            id: studentId,
-            time: format(new Date(data.date), 'HH:mm:ss')
-          };
-
-          if (data.status === 'present') {
-            acc[batch.course].batches[batchIndex].presentStudents.push(attendanceInfo);
-          } else {
-            acc[batch.course].batches[batchIndex].absentStudents.push(attendanceInfo);
-          }
-        });
-
-        return acc;
-      }, {});
-
-      setCourseStats(Object.entries(courseData).map(([course, data]) => ({
-        course,
-        ...data
-      })));
+    if (!window.isSecureContext) {
+      console.warn('Application is not running in a secure context. Geolocation may not work.');
+      setIsSecureContext(false);
     }
-  }, [batches, attendanceRecords, selectedDate]);
 
-  const getOverallAttendanceChartData = () => ({
-    labels: ['Online Present', 'Online Absent', 'Offline Present', 'Offline Absent'],
-    datasets: [{
-      data: [
-        overallStats.onlinePresent,
-        overallStats.onlineAbsent,
-        overallStats.offlinePresent,
-        overallStats.offlineAbsent
-      ],
-      backgroundColor: [
-        '#3b82f6',
-        '#93c5fd',
-        '#14b8a6',
-        '#5eead4'
-      ],
-      borderColor: [
-        '#2563eb',
-        '#60a5fa',
-        '#0d9488',
-        '#2dd4bf'
-      ],
-      borderWidth: 1
-    }]
-  });
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
 
-  const getStudentDistributionData = () => ({
-    labels: ['Online Students', 'Offline Students'],
-    datasets: [{
-      data: [overallStats.onlineStudents, overallStats.offlineStudents],
-      backgroundColor: ['#3b82f6', '#14b8a6'],
-      borderColor: ['#2563eb', '#0d9488'],
-      borderWidth: 1
-    }]
-  });
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
 
-  const getAttendanceRateData = () => {
-    const onlineRate = overallStats.onlineStudents ? 
-      (overallStats.onlinePresent / (overallStats.onlinePresent + overallStats.onlineAbsent)) * 100 : 0;
-    const offlineRate = overallStats.offlineStudents ? 
-      (overallStats.offlinePresent / (overallStats.offlinePresent + overallStats.offlineAbsent)) * 100 : 0;
-
-    return {
-      labels: ['Online', 'Offline'],
-      datasets: [{
-        label: 'Attendance Rate (%)',
-        data: [onlineRate, offlineRate],
-        backgroundColor: ['#3b82f6', '#14b8a6'],
-        borderColor: ['#2563eb', '#0d9488'],
-        borderWidth: 1
-      }]
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      if (locationWatchId) {
+        navigator.geolocation.clearWatch(locationWatchId);
+      }
     };
-  };
+  }, [locationWatchId]);
 
-  const getOverallChartData = (stats) => ({
-    labels: [
-      'Online Present',
-      'Online Absent',
-      'Offline Present',
-      'Offline Absent'
-    ],
-    datasets: [{
-      data: [
-        stats.attendance.onlinePresent,
-        stats.attendance.onlineAbsent,
-        stats.attendance.offlinePresent,
-        stats.attendance.offlineAbsent
-      ],
-      backgroundColor: [
-        '#3b82f6',
-        '#93c5fd',
-        '#14b8a6',
-        '#5eead4'
-      ],
-      borderColor: [
-        '#2563eb',
-        '#60a5fa',
-        '#0d9488',
-        '#2dd4bf'
-      ],
-      borderWidth: 1
-    }]
-  });
-
-  const getMarkingMethodChartData = (stats) => ({
-    labels: ['Admin Marked', 'Device Marked', 'Location Verified'],
-    datasets: [{
-      data: [
-        stats.attendance.adminMarked,
-        stats.attendance.deviceMarked,
-        stats.attendance.locationVerified
-      ],
-      backgroundColor: [
-        '#8b5cf6',
-        '#f59e0b',
-        '#10b981'
-      ],
-      borderColor: [
-        '#7c3aed',
-        '#d97706',
-        '#059669'
-      ],
-      borderWidth: 1
-    }]
-  });
-
-  const chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: {
-        position: 'bottom',
-        labels: {
-          padding: 20,
-          usePointStyle: true
+  useEffect(() => {
+    const fetchBatchDetails = async () => {
+      try {
+        if (!batchId) {
+          console.error('No batch ID provided');
+          toast.error('Invalid attendance link');
+          navigate('/404');
+          return;
         }
-      }
-    },
-    cutout: '70%'
-  };
 
-  const barChartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: {
-        display: false
-      },
-      title: {
-        display: true,
-        text: 'Attendance Rate by Mode'
-      }
-    },
-    scales: {
-      y: {
-        beginAtZero: true,
-        max: 100,
-        title: {
-          display: true,
-          text: 'Percentage (%)'
+        const batchRef = doc(db, 'batches', batchId);
+        const batchDoc = await getDoc(batchRef);
+        
+        if (!batchDoc.exists()) {
+          console.error('Batch not found:', batchId);
+          toast.error('Invalid batch ID or batch not found');
+          navigate('/404');
+          return;
         }
+
+        const batchData = { id: batchDoc.id, ...batchDoc.data() };
+        setBatch(batchData);
+
+        // Check for existing attendance
+        const today = new Date();
+        const startOfDay = new Date(today.setHours(0, 0, 0, 0)).toISOString();
+        const endOfDay = new Date(today.setHours(23, 59, 59, 999)).toISOString();
+
+        const attendanceQuery = query(
+          collection(db, 'attendance'),
+          where('batchId', '==', batchId),
+          where('date', '>=', startOfDay),
+          where('date', '<=', endOfDay),
+          where('deviceId', '==', deviceId)
+        );
+
+        const attendanceSnapshot = await getDocs(attendanceQuery);
+        if (!attendanceSnapshot.empty) {
+          setHasMarkedAttendance(true);
+        }
+      } catch (error) {
+        console.error('Error in fetchBatchDetails:', error);
+        toast.error('Error loading batch details');
+        navigate('/404');
+      } finally {
+        setLoading(false);
       }
+    };
+
+    fetchBatchDetails();
+  }, [batchId, deviceId, navigate]);
+
+  const getCurrentLocation = async () => {
+    if (!navigator.geolocation) {
+      setLocationError('Geolocation is not supported by your browser');
+      return;
+    }
+
+    if (!isSecureContext) {
+      setLocationError('Location services require a secure (HTTPS) connection');
+      return;
+    }
+
+    setIsGettingLocation(true);
+    setLocationError(null);
+
+    // First, request permission explicitly
+    try {
+      const permissionResult = await navigator.permissions.query({ name: 'geolocation' });
+      
+      if (permissionResult.state === 'denied') {
+        setLocationError('Location access is blocked. Please enable location services in your browser settings.');
+        setIsGettingLocation(false);
+        return;
+      }
+    } catch (error) {
+      console.warn('Permission check failed:', error);
+      // Continue anyway as some browsers might not support permissions API
+    }
+
+    const options = {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 0
+    };
+
+    // Clear existing watch
+    if (locationWatchId) {
+      navigator.geolocation.clearWatch(locationWatchId);
+    }
+
+    const handleSuccess = (position) => {
+      try {
+        const newLocation = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        };
+        setLocation(newLocation);
+        setLocationAccuracy(position.coords.accuracy);
+        setIsGettingLocation(false);
+        setLocationError(null);
+        
+        if (position.coords.accuracy <= 20) {
+          if (locationWatchId) {
+            navigator.geolocation.clearWatch(locationWatchId);
+            setLocationWatchId(null);
+          }
+          toast.success('Location acquired successfully');
+        }
+      } catch (error) {
+        console.error('Error processing location:', error);
+        setLocationError('Error processing location data');
+        setIsGettingLocation(false);
+      }
+    };
+
+    const handleError = (error) => {
+      console.error('Geolocation error:', error);
+      let errorMessage = 'Error getting location. Please try again.';
+      
+      switch (error.code) {
+        case 1: // PERMISSION_DENIED
+          errorMessage = 'Location access denied. Please enable location services in your device and browser settings.';
+          // Show instructions for common browsers
+          toast.info('To enable location: Check your browser\'s site settings and device location services.');
+          break;
+        case 2: // POSITION_UNAVAILABLE
+          errorMessage = 'Location information is unavailable. Please check your GPS signal and try again.';
+          break;
+        case 3: // TIMEOUT
+          errorMessage = 'Location request timed out. Please try again in a better signal area.';
+          break;
+      }
+      
+      setLocationError(errorMessage);
+      setIsGettingLocation(false);
+
+      if (error.code === 1 && retryCount < 3) {
+        setRetryCount(prev => prev + 1);
+      }
+    };
+
+    // Try getting location
+    try {
+      // First try a single high-accuracy position
+      navigator.geolocation.getCurrentPosition(handleSuccess, handleError, options);
+
+      // Then start watching for better accuracy
+      const watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, options);
+      setLocationWatchId(watchId);
+
+      // Set a timeout to stop watching after 30 seconds
+      setTimeout(() => {
+        if (locationWatchId === watchId) {
+          navigator.geolocation.clearWatch(watchId);
+          setLocationWatchId(null);
+          if (location && locationAccuracy > 20) {
+            toast.warning('Could not get high accuracy location, but current location can be used');
+          }
+        }
+      }, 30000);
+    } catch (error) {
+      console.error('Geolocation API error:', error);
+      setLocationError('Unexpected error accessing location services');
+      setIsGettingLocation(false);
     }
   };
 
-  const getAttendanceIcon = (record) => {
-    if (record.markedByAdmin) {
-      return <UserCheck className="w-4 h-4 text-purple-500" title="Marked by Admin" />;
-    }
-    if (record.deviceId) {
-      return <Smartphone className="w-4 h-4 text-amber-500" title="Marked via Device" />;
-    }
-    if (record.location?.lat && record.location?.lng) {
-      return <MapPin className="w-4 h-4 text-emerald-500" title="Location Verified" />;
-    }
-    return null;
+  const areLocationsClose = (loc1, loc2, threshold = 0.0001) => {
+    if (!loc1 || !loc2) return false;
+    const latDiff = Math.abs(loc1.lat - loc2.lat);
+    const lngDiff = Math.abs(loc1.lng - loc2.lng);
+    return latDiff < threshold && lngDiff < threshold;
   };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!isOnline) {
+      toast.error('Please check your internet connection');
+      return;
+    }
+
+    if (!selectedStudent) {
+      toast.error('Please select your name');
+      return;
+    }
+
+    if (!location) {
+      toast.error('Please enable location access');
+      return;
+    }
+
+    if (locationAccuracy && locationAccuracy > 100) {
+      toast.error('Location accuracy is too low. Please try again in a better location');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const student = JSON.parse(selectedStudent);
+      const today = new Date();
+      const startOfDay = new Date(today.setHours(0, 0, 0, 0)).toISOString();
+      const endOfDay = new Date(today.setHours(23, 59, 59, 999)).toISOString();
+
+      const attendanceQuery = query(
+        collection(db, 'attendance'),
+        where('batchId', '==', batchId),
+        where('date', '>=', startOfDay),
+        where('date', '<=', endOfDay),
+        where('deviceId', '==', deviceId)
+      );
+
+      const attendanceSnapshot = await getDocs(attendanceQuery);
+      const todayRecords = attendanceSnapshot.docs.map(doc => doc.data());
+      
+      const studentRecord = todayRecords.find(record => record.studentId === student.id);
+      if (studentRecord) {
+        toast.error('You have already marked attendance today');
+        setSubmitting(false);
+        return;
+      }
+
+      const otherStudentRecord = todayRecords.find(record => 
+        record.studentId !== student.id && 
+        areLocationsClose(record.location, location)
+      );
+      if (otherStudentRecord) {
+        toast.error('Another student has already marked attendance from this location today');
+        setSubmitting(false);
+        return;
+      }
+
+      const timestamp = serverTimestamp();
+      const attendanceData = {
+        batchId,
+        batchName: batch.name,
+        studentId: student.id,
+        studentName: student.name,
+        date: today.toISOString(),
+        status: 'present',
+        location: location,
+        locationAccuracy: locationAccuracy,
+        mode: student.mode || 'offline',
+        deviceId,
+        deviceInfo: {
+          userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          screenResolution: `${window.screen.width}x${window.screen.height}`,
+          colorDepth: window.screen.colorDepth,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          language: navigator.language,
+          isMobile: /Mobile|Android|iOS/.test(navigator.userAgent)
+        },
+        timestamp
+      };
+
+      const docRef = await addDoc(collection(db, 'attendance'), attendanceData);
+      
+      const recordForRedux = {
+        ...attendanceData,
+        id: docRef.id,
+        timestamp: Date.now()
+      };
+
+      dispatch(addAttendanceRecord(recordForRedux));
+      dispatch(updateHistory(recordForRedux));
+
+      setHasMarkedAttendance(true);
+      toast.success('Attendance marked successfully!');
+    } catch (error) {
+      console.error('Error marking attendance:', error);
+      toast.error(`Error marking attendance: ${error.message}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex justify-center items-center p-4">
+        <div className="spinner-border text-primary-600" role="status">
+          <span className="sr-only">Loading...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!batch) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex justify-center items-center p-4">
+        <div className="bg-white rounded-lg shadow-md p-6 max-w-md w-full">
+          <div className="text-center">
+            <AlertTriangle className="mx-auto h-12 w-12 text-red-500 mb-4" />
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Invalid Link</h2>
+            <p className="text-gray-600">The attendance link is invalid or has expired.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (hasMarkedAttendance) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex justify-center items-center p-4">
+        <div className="bg-white rounded-lg shadow-md p-8 max-w-md w-full">
+          <div className="text-center">
+            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
+              <CheckCircle className="h-6 w-6 text-green-600" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Attendance Recorded!</h2>
+            <p className="text-gray-600 mb-6">Thank you for marking your attendance.</p>
+            <div className="border-t border-gray-200 pt-4">
+              <div className="flex justify-between text-sm text-gray-600">
+                <span>Batch:</span>
+                <span className="font-medium">{batch.name}</span>
+              </div>
+              <div className="flex justify-between text-sm text-gray-600 mt-2">
+                <span>Date:</span>
+                <span className="font-medium">{format(new Date(), 'PPP')}</span>
+              </div>
+              <div className="flex justify-between text-sm text-gray-600 mt-2">
+                <span>Time:</span>
+                <span className="font-medium">{format(new Date(), 'p')}</span>
+              </div>
+              <div className="flex justify-between text-sm text-gray-600 mt-2">
+                <span>Location:</span>
+                <span className="font-medium">{`${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}`}</span>
+              </div>
+              {locationAccuracy && (
+                <div className="flex justify-between text-sm text-gray-600 mt-2">
+                  <span>Accuracy:</span>
+                  <span className="font-medium">{`±${Math.round(locationAccuracy)}m`}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center">
-          <BookOpen className="mr-2" />
-          Course Overview
-        </h1>
-        <p className="text-gray-600 mt-1">
-          Overall attendance statistics and mode-wise distribution
-        </p>
-      </div>
-
-      <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
-        <h2 className="text-xl font-semibold mb-6 flex items-center">
-          <BarChart className="mr-2" />
-          Overall Attendance Statistics
-        </h2>
-        
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
-          <div className="h-64">
-            <h4 className="text-lg font-semibold mb-4 text-center">Overall Attendance</h4>
-            <Doughnut data={getOverallAttendanceChartData()} options={chartOptions} />
-          </div>
-          
-          <div className="h-64">
-            <h4 className="text-lg font-semibold mb-4 text-center">Student Distribution</h4>
-            <Doughnut data={getStudentDistributionData()} options={chartOptions} />
+    <div className="min-h-screen bg-gray-50 py-8 px-4">
+      <div className="max-w-2xl mx-auto">
+        <div className="bg-white rounded-xl shadow-md overflow-hidden">
+          <div className="bg-gradient-to-r from-primary-600 to-primary-700 px-6 py-4">
+            <h1 className="text-xl font-bold text-white">Mark Attendance</h1>
+            <p className="text-white/80 mt-1">Please fill in your attendance details</p>
           </div>
 
-          <div className="h-64">
-            <h4 className="text-lg font-semibold mb-4 text-center">Attendance Rate by Mode</h4>
-            <Bar data={getAttendanceRateData()} options={barChartOptions} />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-gray-50 rounded-lg p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <Monitor className="text-blue-500 mr-2" size={20} />
-                <span className="text-sm font-medium">Online Present Rate</span>
-              </div>
-              <span className="text-lg font-bold text-blue-600">
-                {overallStats.onlineStudents ? 
-                  ((overallStats.onlinePresent / (overallStats.onlinePresent + overallStats.onlineAbsent)) * 100).toFixed(1) : 0}%
-              </span>
+          {!isSecureContext && (
+            <div className="bg-yellow-50 p-4 flex items-center">
+              <AlertTriangle className="text-yellow-500 mr-2" size={20} />
+              <p className="text-yellow-700">
+                This site requires a secure (HTTPS) connection for location services.
+              </p>
             </div>
-          </div>
+          )}
 
-          <div className="bg-gray-50 rounded-lg p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <Building className="text-teal-500 mr-2" size={20} />
-                <span className="text-sm font-medium">Offline Present Rate</span>
-              </div>
-              <span className="text-lg font-bold text-teal-600">
-                {overallStats.offlineStudents ? 
-                  ((overallStats.offlinePresent / (overallStats.offlinePresent + overallStats.offlineAbsent)) * 100).toFixed(1) : 0}%
-              </span>
+          {!isOnline && (
+            <div className="bg-red-50 p-4 flex items-center">
+              <WifiOff className="text-red-500 mr-2" size={20} />
+              <p className="text-red-700">You are offline. Please check your internet connection.</p>
             </div>
-          </div>
+          )}
 
-          <div className="bg-gray-50 rounded-lg p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <Users className="text-purple-500 mr-2" size={20} />
-                <span className="text-sm font-medium">Total Students</span>
-              </div>
-              <span className="text-lg font-bold text-purple-600">
-                {overallStats.totalStudents}
-              </span>
-            </div>
-          </div>
-
-          <div className="bg-gray-50 rounded-lg p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <CalendarIcon className="text-indigo-500 mr-2" size={20} />
-                <span className="text-sm font-medium">Total Records</span>
-              </div>
-              <span className="text-lg font-bold text-indigo-600">
-                {overallStats.totalAttendance}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="mb-6">
-        <h3 className="text-lg font-semibold mb-2">Select Date</h3>
-        <Calendar
-          onChange={setSelectedDate}
-          value={selectedDate}
-          className="rounded-lg shadow-md"
-          maxDate={new Date()}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 gap-6">
-        {courseStats.map((stats) => (
-          <div key={stats.course} className="bg-white rounded-xl shadow-lg overflow-hidden">
-            <div 
-              className="bg-gradient-to-r from-primary-600 to-primary-700 px-6 py-4 cursor-pointer"
-              onClick={() => setExpandedCourse(expandedCourse === stats.course ? null : stats.course)}
-            >
-              <div className="flex justify-between items-center">
-                <div>
-                  <h3 className="text-xl font-semibold text-white">{stats.course}</h3>
-                  <div className="mt-2 flex items-center gap-4 text-white/80">
-                    <span className="flex items-center">
-                      <Users className="mr-1" size={16} />
-                      {stats.totalStudents} Students
-                    </span>
-                    <span className="flex items-center">
-                      <Monitor className="mr-1" size={16} />
-                      {stats.onlineStudents} Online
-                    </span>
-                    <span className="flex items-center">
-                      <Building className="mr-1" size={16} />
-                      {stats.offlineStudents} Offline
-                    </span>
-                  </div>
+          <div className="p-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center mb-3">
+                  <BookOpen className="text-primary-600 mr-2" size={20} />
+                  <h3 className="font-medium">Course</h3>
                 </div>
-                {expandedCourse === stats.course ? (
-                  <ChevronUp className="text-white" size={24} />
-                ) : (
-                  <ChevronDown className="text-white" size={24} />
-                )}
+                <p className="text-gray-600">{batch.course}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center mb-3">
+                  <Users className="text-primary-600 mr-2" size={20} />
+                  <h3 className="font-medium">Batch</h3>
+                </div>
+                <p className="text-gray-600">{batch.name}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center mb-3">
+                  <Calendar className="text-primary-600 mr-2" size={20} />
+                  <h3 className="font-medium">Date</h3>
+                </div>
+                <p className="text-gray-600">{format(new Date(), 'PPP')}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center mb-3">
+                  <Clock className="text-primary-600 mr-2" size={20} />
+                  <h3 className="font-medium">Time</h3>
+                </div>
+                <p className="text-gray-600">{format(new Date(), 'p')}</p>
               </div>
             </div>
 
-            {expandedCourse === stats.course && (
-              <div className="p-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  <div className="h-64">
-                    <h4 className="text-lg font-semibold mb-4 text-center">Mode-wise Attendance</h4>
-                    <Doughnut data={getOverallChartData(stats)} options={chartOptions} />
-                  </div>
-                  <div className="h-64">
-                    <h4 className="text-lg font-semibold mb-4 text-center">Marking Methods</h4>
-                    <Doughnut data={getMarkingMethodChartData(stats)} options={chartOptions} />
-                  </div>
-                </div>
-
-                <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <UserCheck className="text-purple-500 mr-2" size={20} />
-                        <span className="text-sm font-medium">Admin Marked</span>
-                      </div>
-                      <span className="text-lg font-bold text-purple-600">
-                        {stats.attendance.adminMarked}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <Smartphone className="text-amber-500 mr-2" size={20} />
-                        <span className="text-sm font-medium">Device Marked</span>
-                      </div>
-                      <span className="text-lg font-bold text-amber-600">
-                        {stats.attendance.deviceMarked}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <MapPin className="text-emerald-500 mr-2" size={20} />
-                        <span className="text-sm font-medium">Location Verified</span>
-                      </div>
-                      <span className="text-lg font-bold text-emerald-600">
-                        {stats.attendance.locationVerified}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <CalendarIcon className="text-blue-500 mr-2" size={20} />
-                        <span className="text-sm font-medium">Total Records</span>
-                      </div>
-                      <span className="text-lg font-bold text-blue-600">
-                        {stats.attendance.present + stats.attendance.absent}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-6">
-                  <h4 className="text-lg font-semibold mb-4">
-                    Attendance Details for {format(selectedDate, 'PPP')}
-                  </h4>
-                  {stats.batches.map(batch => (
-                    <div key={batch.id} className="mb-6 bg-gray-50 rounded-lg p-4">
-                      <h5 className="font-medium mb-4 pb-2 border-b">
-                        {batch.name}
-                        <span className="text-sm text-gray-500 ml-2">
-                          ({batch.students} students)
-                        </span>
-                      </h5>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <div className="flex items-center mb-2">
-                            <CheckCircle className="text-green-500 mr-2" size={16} />
-                            <span className="text-sm font-medium">Present</span>
-                          </div>
-                          {batch.presentStudents.length > 0 ? (
-                            <div className="space-y-2">
-                              {batch.presentStudents.map((student) => (
-                                <div key={student.id} className="flex items-center justify-between text-sm bg-white p-2 rounded">
-                                  <div className="flex items-center gap-2">
-                                    {student.mode === 'online' ? (
-                                      <Monitor className="w-4 h-4 text-blue-500" />
-                                    ) : (
-                                      <Building className="w-4 h-4 text-green-500" />
-                                    )}
-                                    <span>{student.name}</span>
-                                    {getAttendanceIcon(student)}
-                                  </div>
-                                  <span className="text-gray-500">{format(new Date(student.date), 'HH:mm')}</span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-sm text-gray-500 bg-white p-2 rounded">No present students</p>
-                          )}
-                        </div>
-
-                        <div>
-                          <div className="flex items-center mb-2">
-                            <XCircle className="text-red-500 mr-2" size={16} />
-                            <span className="text-sm font-medium">Absent</span>
-                          </div>
-                          {batch.absentStudents.length > 0 ? (
-                            <div className="space-y-2">
-                              {batch.absentStudents.map((student) => (
-                                <div key={student.id} className="flex items-center justify-between text-sm bg-white p-2 rounded">
-                                  <div className="flex items-center gap-2">
-                                    {student.mode === 'online' ? (
-                                      <Monitor className="w-4 h-4 text-blue-500" />
-                                    ) : (
-                                      <Building className="w-4 h-4 text-green-500" />
-                                    )}
-                                    <span>{student.name}</span>
-                                    {getAttendanceIcon(student)}
-                                  </div>
-                                  <span className="text-gray-500">{format(new Date(student.date), 'HH:mm')}</span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-sm text-gray-500 bg-white p-2 rounded">No absent students</p>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Select Your Name
+                </label>
+                <select
+                  className="form-control"
+                  value={selectedStudent}
+                  onChange={(e) => setSelectedStudent(e.target.value)}
+                  required
+                >
+                  <option value="">Choose your name</option>
+                  {batch?.students?.map(student => (
+                    <option key={student.id} value={JSON.stringify(student)}>
+                      {student.name} ({student.rollNumber})
+                    </option>
                   ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Location Access
+                  </label>
+                  <button
+                    type="button"
+                    className={`inline-flex items-center px-3 py-1.5 border border-primary-600 text-primary-600 hover:bg-primary-50 rounded-lg text-sm font-medium transition-colors ${
+                      isGettingLocation ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
+                    onClick={getCurrentLocation}
+                    disabled={isGettingLocation || !isSecureContext}
+                  >
+                    {isGettingLocation ? (
+                      <>
+                        <Navigation className="animate-spin mr-2" size={16} />
+                        Getting Location...
+                      </>
+                    ) : (
+                      <>
+                        <MapPin size={16} className="mr-2" />
+                        {location ? 'Update Location' : 'Get Location'}
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {locationError && (
+                  <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded-md">
+                    <div className="flex">
+                      <AlertTriangle className="h-5 w-5 text-red-500 mr-2" />
+                      <div>
+                        <p className="text-sm text-red-700">{locationError}</p>
+                        <p className="text-xs text-red-600 mt-1">
+                          Please ensure location services are enabled in your device settings.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {location && (
+                  <div className="mt-2 p-3 bg-green-50 border-l-4 border-green-500 rounded-md">
+                    <div className="flex flex-col">
+                      <div className="flex items-center">
+                        <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+                        <p className="text-sm text-green-700">
+                          Location acquired successfully
+                        </p>
+                      </div>
+                      <div className="ml-7 mt-1">
+                        <p className="text-xs text-green-600">
+                          Coordinates: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}
+                        </p>
+                        {locationAccuracy && (
+                          <p className="text-xs text-green-600">
+                            Accuracy: ±{Math.round(locationAccuracy)}m
+                            {locationAccuracy > 50 && (
+                              <span className="text-yellow-600 ml-1">
+                                (Consider updating location for better accuracy)
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-2 p-3 bg-blue-50 border-l-4 border-blue-500 rounded-md">
+                  <div className="flex">
+                    <Info className="h-5 w-5 text-blue-500 mr-2" />
+                    <div className="text-sm text-blue-700">
+                      <p>Important Notes:</p>
+                      <ul className="list-disc list-inside mt-1 ml-2">
+                        <li>Attendance can only be marked once per day</li>
+                        <li>Location services must be enabled</li>
+                        <li>GPS accuracy should be within 100 meters</li>
+                        <li>Stable internet connection required</li>
+                      </ul>
+                    </div>
+                  </div>
                 </div>
               </div>
-            )}
+
+              <button
+                type="submit"
+                className={`btn btn-attendance rounded-xl ${
+                  submitting ? 'btn-attendance-loading' : ''
+                } ${
+                  location && isOnline && isSecureContext 
+                    ? 'text-white' 
+                    : 'from-gray-400 to-gray-500 text-white/90'
+                }`}
+                disabled={submitting || !location || !selectedStudent || isGettingLocation || !isOnline || !isSecureContext}
+              >
+                {submitting ? (
+                  <>
+                    <span className="spinner-border w-6 h-6 border-3" />
+                    <span className="ml-2">Marking Attendance...</span>
+                  </>
+                ) : (
+                  <>
+                    <Smartphone className="w-6 h-6" />
+                    <span>Mark Attendance</span>
+                  </>
+                )}
+              </button>
+            </form>
           </div>
-        ))}
+        </div>
       </div>
     </div>
   );
 };
 
-export default Courses;
+export default StudentAttendance;

@@ -18,9 +18,18 @@ import {
 import { addAttendanceRecord } from '../../store/slices/attendanceSlice';
 import { updateHistory } from '../../store/slices/scheduleSlice';
 import { db } from '../../firebase/config';
-import { collection, doc, getDoc, addDoc, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
+import { 
+  collection, 
+  doc, 
+  getDoc, 
+  addDoc, 
+  serverTimestamp, 
+  query, 
+  where, 
+  getDocs
+} from 'firebase/firestore';
 import { toast } from 'react-toastify';
-import { format } from 'date-fns';
+import { format, startOfDay, endOfDay } from 'date-fns';
 
 const getDeviceId = () => {
   try {
@@ -34,7 +43,7 @@ const getDeviceId = () => {
       window.screen.colorDepth,
       Intl.DateTimeFormat().resolvedOptions().timeZone,
       navigator.language,
-      Date.now()
+      new Date().toISOString()
     ].filter(Boolean);
     
     const deviceId = btoa(components.join('-'));
@@ -64,13 +73,9 @@ const StudentAttendance = () => {
   const [locationWatchId, setLocationWatchId] = useState(null);
   const [retryCount, setRetryCount] = useState(0);
   const [isSecureContext, setIsSecureContext] = useState(window.isSecureContext);
+  const [existingAttendance, setExistingAttendance] = useState(null);
 
   useEffect(() => {
-    if (!window.isSecureContext) {
-      console.warn('Application is not running in a secure context. Geolocation may not work.');
-      setIsSecureContext(false);
-    }
-
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
 
@@ -86,11 +91,68 @@ const StudentAttendance = () => {
     };
   }, [locationWatchId]);
 
+  const checkDeviceAttendance = async () => {
+    try {
+      const today = new Date();
+      const startOfDayDate = startOfDay(today);
+      const endOfDayDate = endOfDay(today);
+
+      const attendanceRef = collection(db, 'attendance');
+      const deviceQuery = query(
+        attendanceRef,
+        where('batchId', '==', batchId),
+        where('deviceId', '==', deviceId),
+        where('date', '>=', startOfDayDate.toISOString()),
+        where('date', '<=', endOfDayDate.toISOString())
+      );
+
+      const deviceSnapshot = await getDocs(deviceQuery);
+      if (!deviceSnapshot.empty) {
+        const attendanceData = deviceSnapshot.docs[0].data();
+        setExistingAttendance(attendanceData);
+        setHasMarkedAttendance(true);
+        return { exists: true, message: 'This device has already been used to mark attendance today' };
+      }
+      return { exists: false };
+    } catch (error) {
+      console.error('Error checking device attendance:', error);
+      return { exists: false, error };
+    }
+  };
+
+  const checkStudentAttendance = async (studentId) => {
+    try {
+      const today = new Date();
+      const startOfDayDate = startOfDay(today);
+      const endOfDayDate = endOfDay(today);
+
+      const attendanceRef = collection(db, 'attendance');
+      const studentQuery = query(
+        attendanceRef,
+        where('batchId', '==', batchId),
+        where('studentId', '==', studentId),
+        where('date', '>=', startOfDayDate.toISOString()),
+        where('date', '<=', endOfDayDate.toISOString())
+      );
+
+      const studentSnapshot = await getDocs(studentQuery);
+      if (!studentSnapshot.empty) {
+        const attendanceData = studentSnapshot.docs[0].data();
+        setExistingAttendance(attendanceData);
+        setHasMarkedAttendance(true);
+        return { exists: true, message: 'You have already marked attendance today' };
+      }
+      return { exists: false };
+    } catch (error) {
+      console.error('Error checking student attendance:', error);
+      return { exists: false, error };
+    }
+  };
+
   useEffect(() => {
     const fetchBatchDetails = async () => {
       try {
         if (!batchId) {
-          console.error('No batch ID provided');
           toast.error('Invalid attendance link');
           navigate('/404');
           return;
@@ -100,7 +162,6 @@ const StudentAttendance = () => {
         const batchDoc = await getDoc(batchRef);
         
         if (!batchDoc.exists()) {
-          console.error('Batch not found:', batchId);
           toast.error('Invalid batch ID or batch not found');
           navigate('/404');
           return;
@@ -109,25 +170,13 @@ const StudentAttendance = () => {
         const batchData = { id: batchDoc.id, ...batchDoc.data() };
         setBatch(batchData);
 
-        // Check for existing attendance
-        const today = new Date();
-        const startOfDay = new Date(today.setHours(0, 0, 0, 0)).toISOString();
-        const endOfDay = new Date(today.setHours(23, 59, 59, 999)).toISOString();
-
-        const attendanceQuery = query(
-          collection(db, 'attendance'),
-          where('batchId', '==', batchId),
-          where('date', '>=', startOfDay),
-          where('date', '<=', endOfDay),
-          where('deviceId', '==', deviceId)
-        );
-
-        const attendanceSnapshot = await getDocs(attendanceQuery);
-        if (!attendanceSnapshot.empty) {
-          setHasMarkedAttendance(true);
+        // Check if device has already marked attendance today
+        const deviceCheck = await checkDeviceAttendance();
+        if (deviceCheck.exists) {
+          toast.error(deviceCheck.message);
         }
       } catch (error) {
-        console.error('Error in fetchBatchDetails:', error);
+        console.error('Error fetching batch:', error);
         toast.error('Error loading batch details');
         navigate('/404');
       } finally {
@@ -137,6 +186,20 @@ const StudentAttendance = () => {
 
     fetchBatchDetails();
   }, [batchId, deviceId, navigate]);
+
+  useEffect(() => {
+    const checkAttendance = async () => {
+      if (selectedStudent) {
+        const student = JSON.parse(selectedStudent);
+        const studentCheck = await checkStudentAttendance(student.id);
+        if (studentCheck.exists) {
+          toast.error(studentCheck.message);
+        }
+      }
+    };
+
+    checkAttendance();
+  }, [selectedStudent, batchId]);
 
   const getCurrentLocation = async () => {
     if (!navigator.geolocation) {
@@ -152,7 +215,6 @@ const StudentAttendance = () => {
     setIsGettingLocation(true);
     setLocationError(null);
 
-    // First, request permission explicitly
     try {
       const permissionResult = await navigator.permissions.query({ name: 'geolocation' });
       
@@ -163,7 +225,6 @@ const StudentAttendance = () => {
       }
     } catch (error) {
       console.warn('Permission check failed:', error);
-      // Continue anyway as some browsers might not support permissions API
     }
 
     const options = {
@@ -172,7 +233,6 @@ const StudentAttendance = () => {
       maximumAge: 0
     };
 
-    // Clear existing watch
     if (locationWatchId) {
       navigator.geolocation.clearWatch(locationWatchId);
     }
@@ -207,15 +267,14 @@ const StudentAttendance = () => {
       let errorMessage = 'Error getting location. Please try again.';
       
       switch (error.code) {
-        case 1: // PERMISSION_DENIED
+        case 1:
           errorMessage = 'Location access denied. Please enable location services in your device and browser settings.';
-          // Show instructions for common browsers
           toast.info('To enable location: Check your browser\'s site settings and device location services.');
           break;
-        case 2: // POSITION_UNAVAILABLE
+        case 2:
           errorMessage = 'Location information is unavailable. Please check your GPS signal and try again.';
           break;
-        case 3: // TIMEOUT
+        case 3:
           errorMessage = 'Location request timed out. Please try again in a better signal area.';
           break;
       }
@@ -228,16 +287,12 @@ const StudentAttendance = () => {
       }
     };
 
-    // Try getting location
     try {
-      // First try a single high-accuracy position
       navigator.geolocation.getCurrentPosition(handleSuccess, handleError, options);
 
-      // Then start watching for better accuracy
       const watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, options);
       setLocationWatchId(watchId);
 
-      // Set a timeout to stop watching after 30 seconds
       setTimeout(() => {
         if (locationWatchId === watchId) {
           navigator.geolocation.clearWatch(watchId);
@@ -252,13 +307,6 @@ const StudentAttendance = () => {
       setLocationError('Unexpected error accessing location services');
       setIsGettingLocation(false);
     }
-  };
-
-  const areLocationsClose = (loc1, loc2, threshold = 0.0001) => {
-    if (!loc1 || !loc2) return false;
-    const latDiff = Math.abs(loc1.lat - loc2.lat);
-    const lngDiff = Math.abs(loc1.lng - loc2.lng);
-    return latDiff < threshold && lngDiff < threshold;
   };
 
   const handleSubmit = async (e) => {
@@ -288,38 +336,24 @@ const StudentAttendance = () => {
     try {
       const student = JSON.parse(selectedStudent);
       const today = new Date();
-      const startOfDay = new Date(today.setHours(0, 0, 0, 0)).toISOString();
-      const endOfDay = new Date(today.setHours(23, 59, 59, 999)).toISOString();
 
-      const attendanceQuery = query(
-        collection(db, 'attendance'),
-        where('batchId', '==', batchId),
-        where('date', '>=', startOfDay),
-        where('date', '<=', endOfDay),
-        where('deviceId', '==', deviceId)
-      );
-
-      const attendanceSnapshot = await getDocs(attendanceQuery);
-      const todayRecords = attendanceSnapshot.docs.map(doc => doc.data());
-      
-      const studentRecord = todayRecords.find(record => record.studentId === student.id);
-      if (studentRecord) {
-        toast.error('You have already marked attendance today');
+      // Check both device and student attendance
+      const deviceCheck = await checkDeviceAttendance();
+      if (deviceCheck.exists) {
+        toast.error(deviceCheck.message);
+        setHasMarkedAttendance(true);
         setSubmitting(false);
         return;
       }
 
-      const otherStudentRecord = todayRecords.find(record => 
-        record.studentId !== student.id && 
-        areLocationsClose(record.location, location)
-      );
-      if (otherStudentRecord) {
-        toast.error('Another student has already marked attendance from this location today');
+      const studentCheck = await checkStudentAttendance(student.id);
+      if (studentCheck.exists) {
+        toast.error(studentCheck.message);
+        setHasMarkedAttendance(true);
         setSubmitting(false);
         return;
       }
 
-      const timestamp = serverTimestamp();
       const attendanceData = {
         batchId,
         batchName: batch.name,
@@ -340,7 +374,7 @@ const StudentAttendance = () => {
           language: navigator.language,
           isMobile: /Mobile|Android|iOS/.test(navigator.userAgent)
         },
-        timestamp
+        timestamp: serverTimestamp()
       };
 
       const docRef = await addDoc(collection(db, 'attendance'), attendanceData);
@@ -355,10 +389,22 @@ const StudentAttendance = () => {
       dispatch(updateHistory(recordForRedux));
 
       setHasMarkedAttendance(true);
+      setExistingAttendance(attendanceData);
+      
       toast.success('Attendance marked successfully!');
     } catch (error) {
       console.error('Error marking attendance:', error);
-      toast.error(`Error marking attendance: ${error.message}`);
+      if (error.code === 'permission-denied') {
+        toast.error('Attendance already marked');
+        const deviceCheck = await checkDeviceAttendance();
+        const student = JSON.parse(selectedStudent);
+        const studentCheck = await checkStudentAttendance(student.id);
+        if (deviceCheck.exists || studentCheck.exists) {
+          setHasMarkedAttendance(true);
+        }
+      } else {
+        toast.error('Failed to mark attendance. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -388,7 +434,7 @@ const StudentAttendance = () => {
     );
   }
 
-  if (hasMarkedAttendance) {
+  if (hasMarkedAttendance && existingAttendance) {
     return (
       <div className="min-h-screen bg-gray-50 flex justify-center items-center p-4">
         <div className="bg-white rounded-lg shadow-md p-8 max-w-md w-full">
@@ -396,31 +442,29 @@ const StudentAttendance = () => {
             <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">
               <CheckCircle className="h-6 w-6 text-green-600" />
             </div>
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">Attendance Recorded!</h2>
-            <p className="text-gray-600 mb-6">Thank you for marking your attendance.</p>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Attendance Already Marked!</h2>
+            <p className="text-gray-600 mb-6">You have already marked your attendance for today.</p>
             <div className="border-t border-gray-200 pt-4">
               <div className="flex justify-between text-sm text-gray-600">
                 <span>Batch:</span>
-                <span className="font-medium">{batch.name}</span>
+                <span className="font-medium">{existingAttendance.batchName}</span>
+              </div>
+              <div className="flex justify-between text-sm text-gray-600 mt-2">
+                <span>Student:</span>
+                <span className="font-medium">{existingAttendance.studentName}</span>
               </div>
               <div className="flex justify-between text-sm text-gray-600 mt-2">
                 <span>Date:</span>
-                <span className="font-medium">{format(new Date(), 'PPP')}</span>
+                <span className="font-medium">{format(new Date(existingAttendance.date), 'PPP')}</span>
               </div>
               <div className="flex justify-between text-sm text-gray-600 mt-2">
                 <span>Time:</span>
-                <span className="font-medium">{format(new Date(), 'p')}</span>
+                <span className="font-medium">{format(new Date(existingAttendance.date), 'p')}</span>
               </div>
               <div className="flex justify-between text-sm text-gray-600 mt-2">
-                <span>Location:</span>
-                <span className="font-medium">{`${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}`}</span>
+                <span>Status:</span>
+                <span className="font-medium text-green-600">Present</span>
               </div>
-              {locationAccuracy && (
-                <div className="flex justify-between text-sm text-gray-600 mt-2">
-                  <span>Accuracy:</span>
-                  <span className="font-medium">{`±${Math.round(locationAccuracy)}m`}</span>
-                </div>
-              )}
             </div>
           </div>
         </div>
