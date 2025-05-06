@@ -1,0 +1,70 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAdmin() {
+      return request.auth != null && request.auth.token.email.matches(".*@admin[.]com$");
+    }
+
+    function isValidAttendanceData() {
+      let data = request.resource.data;
+      return data.keys().hasAll([
+        'batchId',
+        'batchName',
+        'studentId',
+        'studentName',
+        'date',
+        'status',
+        'location',
+        'mode',
+        'deviceId',
+        'deviceInfo',
+        'timestamp'
+      ]) &&
+      data.location is map &&
+      data.location.keys().hasAll(['lat', 'lng']) &&
+      data.deviceInfo is map;
+    }
+
+    // Batches collection rules
+    match /batches/{batchId} {
+      // Allow reading individual batch documents and listing batches without authentication
+      allow get, list: if true;
+      
+      // Only admins can create and delete batches
+      allow create, delete: if isAdmin();
+      
+      // Allow updating batch with new students or by admin
+      allow update: if isAdmin() || (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['students']) &&
+        request.resource.data.registrationToken == resource.data.registrationToken
+      );
+    }
+
+    // Attendance collection rules
+    match /attendance/{attendanceId} {
+      // Allow admins full access
+      allow read, write: if isAdmin();
+      
+      // Allow students to read their own attendance
+      allow read: if request.auth != null && 
+                    resource.data.studentId == request.auth.uid;
+
+      // Allow creating attendance records with proper validation
+      allow create: if isValidAttendanceData() &&
+                   request.resource.data.deviceInfo is map &&
+                   request.resource.data.location is map &&
+                   request.resource.data.location.lat is number &&
+                   request.resource.data.location.lng is number;
+
+      // Allow querying attendance records
+      allow list: if true;
+    }
+
+    // Default deny all other access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
